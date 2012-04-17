@@ -1,20 +1,21 @@
 package org.github.avereshchagin.depchecker;
 
-import org.apache.maven.artifact.Artifact;
-import org.apache.maven.artifact.factory.ArtifactFactory;
-import org.apache.maven.artifact.repository.ArtifactRepository;
-import org.apache.maven.artifact.resolver.filter.ScopeArtifactFilter;
-import org.apache.maven.model.Dependency;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.MavenProjectBuilder;
-import org.apache.maven.project.ProjectBuildingException;
-import org.apache.maven.project.artifact.InvalidDependencyVersionException;
+import org.sonatype.aether.RepositorySystem;
+import org.sonatype.aether.RepositorySystemSession;
+import org.sonatype.aether.artifact.Artifact;
+import org.sonatype.aether.collection.CollectRequest;
+import org.sonatype.aether.graph.Dependency;
+import org.sonatype.aether.graph.DependencyNode;
+import org.sonatype.aether.repository.RemoteRepository;
+import org.sonatype.aether.resolution.DependencyRequest;
+import org.sonatype.aether.util.artifact.DefaultArtifact;
+import org.sonatype.aether.util.graph.PreorderNodeListGenerator;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * @goal depchecker
@@ -40,54 +41,74 @@ public class Main extends AbstractMojo {
     protected MavenProject project;
 
     /**
-     * @component role="org.apache.maven.project.MavenProjectBuilder"
-     * @required
-     * @readonly
-     */
-    protected MavenProjectBuilder mavenProjectBuilder;
-
-    /**
-     * @parameter expression="${localRepository}"
-     * @readonly
-     * @required
-     */
-    protected ArtifactRepository local;
-
-    /**
-     * @parameter expression="${project.remoteArtifactRepositories}"
-     * @readonly
-     * @required
-     */
-    protected List<ArtifactRepository> remoteRepos;
-
-    /**
+     * The entry point to Aether, i.e. the component doing all the work.
+     *
      * @component
      */
-    protected ArtifactFactory factory;
+    private RepositorySystem repoSystem;
+
+    /**
+     * The current repository/network configuration of Maven.
+     *
+     * @parameter default-value="${repositorySystemSession}"
+     * @readonly
+     */
+    private RepositorySystemSession repoSession;
+
+    /**
+     * The project's remote repositories to use for the resolution of plugins and their dependencies.
+     *
+     * @parameter default-value="${project.remotePluginRepositories}"
+     * @readonly
+     */
+    private List<RemoteRepository> remoteRepos;
 
     public void execute()
             throws MojoExecutionException {
         try {
             getLog().info("Depchecker: " + groupId + " : " + artifactId);
-            Artifact pomArtifact = this.factory.createArtifact(groupId, artifactId,
-                    Artifact.SNAPSHOT_VERSION, "", "pom");
-            MavenProject pomProject = mavenProjectBuilder.buildFromRepository(pomArtifact, remoteRepos, local);
-            resolveDependencies(pomProject);
+            DefaultArtifact artifact = new DefaultArtifact(groupId + ":" + artifactId + ":1.0-SNAPSHOT");
+
+            recursiveList(artifact, 3);
         } catch (Exception e) {
             getLog().error("Depchecker: " + e.getMessage());
         }
     }
 
-    private void resolveDependencies(MavenProject project)
-            throws InvalidDependencyVersionException, ProjectBuildingException {
-        Set<Artifact> artifacts = project.createArtifacts(this.factory, Artifact.SCOPE_TEST,
-                new ScopeArtifactFilter(Artifact.SCOPE_TEST));
-        for (Artifact artifact : artifacts) {
-            getLog().info("Depchecker: " + artifact.getGroupId() + " : " + artifact.getArtifactId());
-            Artifact pomArtifact = this.factory.createArtifact(artifact.getGroupId(), artifact.getArtifactId(),
-                    artifact.getVersion(), "", "pom");
-            MavenProject pomProject = mavenProjectBuilder.buildFromRepository(pomArtifact, remoteRepos, local);
-            resolveDependencies(pomProject);
+    private void recursiveList(Artifact artifact, int n) {
+        if (n > 0) {
+            List<Dependency> projectDependencies = getArtifactsDependencies(artifact);
+            for (Dependency d : projectDependencies) {
+                Artifact subArtifact = d.getArtifact();
+                getLog().info("Depchecker: " + subArtifact.getGroupId());
+                getLog().info("Depchecker: " + subArtifact.getArtifactId());
+                recursiveList(subArtifact, n - 1);
+            }
         }
+    }
+
+    private List<Dependency> getArtifactsDependencies(Artifact a) {
+        List<Dependency> ret = new ArrayList<Dependency>();
+
+        DefaultArtifact pomArtifact = new DefaultArtifact(a.getGroupId(), a.getArtifactId(), "pom", a.getVersion());
+        CollectRequest collectRequest = new CollectRequest();
+        collectRequest.setRoot(new Dependency(pomArtifact, "test"));
+        collectRequest.setRepositories(remoteRepos);
+
+        try {
+            DependencyNode node = repoSystem.collectDependencies(repoSession, collectRequest).getRoot();
+            DependencyRequest projectDependencyRequest = new DependencyRequest(node, null);
+
+            repoSystem.resolveDependencies(repoSession, projectDependencyRequest);
+
+            PreorderNodeListGenerator nlg = new PreorderNodeListGenerator();
+            node.accept(nlg);
+
+            ret.addAll(nlg.getDependencies(true));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return ret;
     }
 }
